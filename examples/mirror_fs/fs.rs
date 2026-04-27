@@ -43,13 +43,13 @@ mod write_impl;
 
 pub const READ_WRITE_MAX: u32 = 1024 * 1024;
 const READ_DIR_PREF: u32 = 8 * 1024;
-const READ_FILE_CACHE_LIMIT: usize = 1024;
-const ATTRIBUTE_CACHE_LIMIT: usize = 16 * 1024;
+const READ_FILE_CACHE_LIMIT: usize = 8192;
+const ATTRIBUTE_CACHE_LIMIT: usize = 64 * 1024;
 const ATTRIBUTE_CACHE_TTL: Duration = Duration::from_secs(60);
-const DIRECTORY_LISTING_CACHE_LIMIT: usize = 1024;
+const DIRECTORY_LISTING_CACHE_LIMIT: usize = 4096;
 const DIRECTORY_LISTING_CACHE_TTL: Duration = Duration::from_millis(700);
 const READ_AHEAD_BLOCK_SIZE: usize = READ_WRITE_MAX as usize;
-const READ_AHEAD_CACHE_LIMIT: usize = 1024;
+const READ_AHEAD_CACHE_LIMIT: usize = 8192;
 const READ_AHEAD_CACHE_TTL: Duration = Duration::from_secs(30);
 const READDIRPLUS_ATTR_PARALLELISM: usize = 16;
 const EXPORT_ID_SHIFT: u32 = 56;

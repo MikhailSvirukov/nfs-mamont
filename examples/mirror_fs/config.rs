@@ -83,14 +83,14 @@ impl Default for AllocatorConfig {
 
 impl Default for DiskIoConfig {
     fn default() -> Self {
-        let worker_count = thread::available_parallelism().map_or(4, usize::from).clamp(2, 8);
+        let worker_count = thread::available_parallelism().map_or(8, usize::from).clamp(4, 16);
         Self {
             worker_count: NonZeroUsize::new(worker_count).unwrap(),
-            ring_entries: 256,
-            max_inflight_per_worker: NonZeroUsize::new(512).unwrap(),
-            channel_capacity: NonZeroUsize::new(1024).unwrap(),
-            prefetch_budget_per_worker: NonZeroUsize::new(32).unwrap(),
-            enable_fixed_files: false,
+            ring_entries: 4096,
+            max_inflight_per_worker: NonZeroUsize::new(8192).unwrap(),
+            channel_capacity: NonZeroUsize::new(8192).unwrap(),
+            prefetch_budget_per_worker: NonZeroUsize::new(64).unwrap(),
+            enable_fixed_files: true,
         }
     }
 }
@@ -99,9 +99,9 @@ impl Default for ReadPathConfig {
     fn default() -> Self {
         Self {
             small_io_threshold: NonZeroUsize::new(32 * 1024).unwrap(),
-            read_ahead_trigger_bytes: NonZeroUsize::new(256 * 1024).unwrap(),
-            read_ahead_window_blocks: NonZeroUsize::new(8).unwrap(),
-            read_ahead_per_file_limit: NonZeroUsize::new(16).unwrap(),
+            read_ahead_trigger_bytes: NonZeroUsize::new(128 * 1024).unwrap(),
+            read_ahead_window_blocks: NonZeroUsize::new(16).unwrap(),
+            read_ahead_per_file_limit: NonZeroUsize::new(32).unwrap(),
             sequential_detection_window_ms: NonZeroUsize::new(6_000).unwrap(),
             sendfile_min_bytes: NonZeroUsize::new(32 * 1024).unwrap(),
         }

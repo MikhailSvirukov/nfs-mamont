@@ -27,7 +27,7 @@ pub struct DiskIo {
     workers: Arc<[WorkerHandle]>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DiskFile {
     file: Arc<File>,
     shard: usize,

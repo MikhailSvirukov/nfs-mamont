@@ -7,7 +7,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -68,19 +68,8 @@ pub struct DiskIoMetricsSnapshot {
 #[derive(Clone)]
 struct WorkerHandle {
     sender: Sender<QueuedRequest>,
-    metrics: Arc<WorkerMetrics>,
 }
 
-#[derive(Default)]
-struct WorkerMetrics {
-    submitted_sqes: AtomicU64,
-    completed_cqes: AtomicU64,
-    batched_submits: AtomicU64,
-    sq_full_events: AtomicU64,
-    dropped_background_requests: AtomicU64,
-    current_inflight: AtomicUsize,
-    max_inflight: AtomicUsize,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestPriority {
@@ -172,53 +161,11 @@ impl DiskIo {
         for worker_idx in 0..worker_count {
             let (sender, receiver) =
                 async_channel::bounded::<QueuedRequest>(config.channel_capacity.get());
-            let metrics = Arc::new(WorkerMetrics::default());
-            Worker::spawn(worker_idx, receiver, config.clone(), metrics.clone())?;
-            workers.push(WorkerHandle { sender, metrics });
+            Worker::spawn(worker_idx, receiver, config.clone())?;
+            workers.push(WorkerHandle { sender});
         }
 
         Ok(Self { workers: Arc::<[WorkerHandle]>::from(workers) })
-    }
-
-    pub fn metrics_snapshot(&self) -> DiskIoMetricsSnapshot {
-        let mut workers = Vec::with_capacity(self.workers.len());
-        let mut submitted_sqes = 0;
-        let mut completed_cqes = 0;
-        let mut batched_submits = 0;
-        let mut sq_full_events = 0;
-        let mut dropped_background_requests = 0;
-
-        for (worker_index, worker) in self.workers.iter().enumerate() {
-            let snapshot = WorkerMetricsSnapshot {
-                worker_index,
-                submitted_sqes: worker.metrics.submitted_sqes.load(Ordering::Relaxed),
-                completed_cqes: worker.metrics.completed_cqes.load(Ordering::Relaxed),
-                batched_submits: worker.metrics.batched_submits.load(Ordering::Relaxed),
-                sq_full_events: worker.metrics.sq_full_events.load(Ordering::Relaxed),
-                dropped_background_requests: worker
-                    .metrics
-                    .dropped_background_requests
-                    .load(Ordering::Relaxed),
-                current_inflight: worker.metrics.current_inflight.load(Ordering::Relaxed),
-                max_inflight: worker.metrics.max_inflight.load(Ordering::Relaxed),
-                channel_backlog: worker.sender.len(),
-            };
-            submitted_sqes += snapshot.submitted_sqes;
-            completed_cqes += snapshot.completed_cqes;
-            batched_submits += snapshot.batched_submits;
-            sq_full_events += snapshot.sq_full_events;
-            dropped_background_requests += snapshot.dropped_background_requests;
-            workers.push(snapshot);
-        }
-
-        DiskIoMetricsSnapshot {
-            submitted_sqes,
-            completed_cqes,
-            batched_submits,
-            sq_full_events,
-            dropped_background_requests,
-            workers,
-        }
     }
 
     pub async fn open_read(&self, path: &Path) -> Result<Arc<DiskFile>, vfs::Error> {
@@ -381,7 +328,6 @@ impl DiskIo {
             RequestPriority::Background => match worker.sender.try_send(queued) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
-                    worker.metrics.dropped_background_requests.fetch_add(1, Ordering::Relaxed);
                     Err(io::Error::new(io::ErrorKind::WouldBlock, "background queue is full"))
                 }
                 Err(TrySendError::Closed(_)) => Err(io::Error::new(
@@ -418,7 +364,6 @@ struct Worker {
     ring: IoUring,
     receiver: Receiver<QueuedRequest>,
     config: DiskIoConfig,
-    metrics: Arc<WorkerMetrics>,
     pending_foreground: VecDeque<Request>,
     pending_background: VecDeque<Request>,
     retry_queue: VecDeque<InflightOp>,
@@ -432,7 +377,6 @@ impl Worker {
         worker_idx: usize,
         receiver: Receiver<QueuedRequest>,
         config: DiskIoConfig,
-        metrics: Arc<WorkerMetrics>,
     ) -> io::Result<()> {
         let ring = IoUring::new(config.ring_entries)?;
         thread::Builder::new()
@@ -443,7 +387,6 @@ impl Worker {
                     ring,
                     receiver,
                     config,
-                    metrics,
                     pending_foreground: VecDeque::new(),
                     pending_background: VecDeque::new(),
                     retry_queue: VecDeque::new(),
@@ -470,7 +413,6 @@ impl Worker {
                     self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring submit failed"));
                     break;
                 }
-                self.metrics.batched_submits.fetch_add(1, Ordering::Relaxed);
             }
 
             let completed_now = self.drain_completions();
@@ -547,7 +489,6 @@ impl Worker {
 
             let push_result = unsafe { self.ring.submission().push(&entry) };
             if push_result.is_err() {
-                self.metrics.sq_full_events.fetch_add(1, Ordering::Relaxed);
                 self.retry_queue.push_front(op);
                 break;
             }
@@ -557,12 +498,7 @@ impl Worker {
             }
             self.inflight.insert(user_data, op);
             submitted += 1;
-            self.metrics.submitted_sqes.fetch_add(1, Ordering::Relaxed);
-            self.metrics.current_inflight.fetch_add(1, Ordering::Relaxed);
-            update_max(
-                &self.metrics.max_inflight,
-                self.metrics.current_inflight.load(Ordering::Relaxed),
-            );
+
         }
 
         submitted
@@ -675,8 +611,6 @@ impl Worker {
             let Some(op) = self.inflight.remove(&user_data) else {
                 continue;
             };
-            self.metrics.completed_cqes.fetch_add(1, Ordering::Relaxed);
-            self.metrics.current_inflight.fetch_sub(1, Ordering::Relaxed);
             if op.priority() == RequestPriority::Background {
                 self.background_inflight = self.background_inflight.saturating_sub(1);
             }

@@ -270,10 +270,6 @@ impl MirrorFS {
         self.read_path_config.read_ahead_per_file_limit.get()
     }
 
-    pub fn disk_io_metrics_snapshot(&self) -> DiskIoMetricsSnapshot {
-        self.disk_io.metrics_snapshot()
-    }
-
     fn cookie_verifier_for_attr(attr: &file::Attr) -> read_dir::CookieVerifier {
         let mut raw = [0u8; NFS3_COOKIEVERFSIZE];
         raw[..4].copy_from_slice(&attr.ctime.seconds.to_be_bytes());

@@ -43,10 +43,6 @@ pub struct DiskIoConfig {
     pub channel_capacity: NonZeroUsize,
     pub prefetch_budget_per_worker: NonZeroUsize,
     pub enable_fixed_files: bool,
-    pub enable_write_coalescing: bool,
-    pub write_coalesce_window_us: NonZeroUsize,
-    pub enable_sqpoll: bool,
-    pub sqpoll_cpu: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -90,15 +86,11 @@ impl Default for DiskIoConfig {
         let worker_count = thread::available_parallelism().map_or(4, usize::from).clamp(2, 8);
         Self {
             worker_count: NonZeroUsize::new(worker_count).unwrap(),
-            ring_entries: 2048,
-            max_inflight_per_worker: NonZeroUsize::new(4096).unwrap(),
-            channel_capacity: NonZeroUsize::new(4096).unwrap(),
+            ring_entries: 256,
+            max_inflight_per_worker: NonZeroUsize::new(512).unwrap(),
+            channel_capacity: NonZeroUsize::new(1024).unwrap(),
             prefetch_budget_per_worker: NonZeroUsize::new(32).unwrap(),
-            enable_fixed_files: true,
-            enable_write_coalescing: true,
-            write_coalesce_window_us: NonZeroUsize::new(500).unwrap(),
-            enable_sqpoll: false,
-            sqpoll_cpu: None,
+            enable_fixed_files: false,
         }
     }
 }
@@ -148,10 +140,6 @@ impl std::fmt::Debug for DiskIoConfig {
             .field("channel_capacity", &self.channel_capacity)
             .field("prefetch_budget_per_worker", &self.prefetch_budget_per_worker)
             .field("enable_fixed_files", &self.enable_fixed_files)
-            .field("enable_write_coalescing", &self.enable_write_coalescing)
-            .field("write_coalesce_window_us", &self.write_coalesce_window_us)
-            .field("enable_sqpoll", &self.enable_sqpoll)
-            .field("sqpoll_cpu", &self.sqpoll_cpu)
             .finish()
     }
 }
@@ -216,14 +204,6 @@ pub fn load_config(path: &Path) -> std::io::Result<Config> {
             enable_fixed_files: raw_disk_io
                 .enable_fixed_files
                 .unwrap_or(disk_io_defaults.enable_fixed_files),
-            enable_write_coalescing: raw_disk_io
-                .enable_write_coalescing
-                .unwrap_or(disk_io_defaults.enable_write_coalescing),
-            write_coalesce_window_us: raw_disk_io
-                .write_coalesce_window_us
-                .unwrap_or(disk_io_defaults.write_coalesce_window_us),
-            enable_sqpoll: raw_disk_io.enable_sqpoll.unwrap_or(disk_io_defaults.enable_sqpoll),
-            sqpoll_cpu: raw_disk_io.sqpoll_cpu.or(disk_io_defaults.sqpoll_cpu),
         },
         None => disk_io_defaults,
     };
@@ -317,11 +297,6 @@ struct RawDiskIoConfig {
     #[serde(deserialize_with = "dehumansize_nonzero", default)]
     prefetch_budget_per_worker: Option<NonZeroUsize>,
     enable_fixed_files: Option<bool>,
-    enable_write_coalescing: Option<bool>,
-    #[serde(deserialize_with = "dehumansize_nonzero", default)]
-    write_coalesce_window_us: Option<NonZeroUsize>,
-    enable_sqpoll: Option<bool>,
-    sqpoll_cpu: Option<u32>,
 }
 
 #[derive(Deserialize)]

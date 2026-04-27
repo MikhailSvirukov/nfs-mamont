@@ -7,7 +7,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -42,34 +41,10 @@ pub struct DirectoryEntryData {
     pub file_id: u64,
 }
 
-#[derive(Clone, Debug)]
-pub struct WorkerMetricsSnapshot {
-    pub worker_index: usize,
-    pub submitted_sqes: u64,
-    pub completed_cqes: u64,
-    pub batched_submits: u64,
-    pub sq_full_events: u64,
-    pub dropped_background_requests: u64,
-    pub current_inflight: usize,
-    pub max_inflight: usize,
-    pub channel_backlog: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct DiskIoMetricsSnapshot {
-    pub submitted_sqes: u64,
-    pub completed_cqes: u64,
-    pub batched_submits: u64,
-    pub sq_full_events: u64,
-    pub dropped_background_requests: u64,
-    pub workers: Vec<WorkerMetricsSnapshot>,
-}
-
 #[derive(Clone)]
 struct WorkerHandle {
     sender: Sender<QueuedRequest>,
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestPriority {
@@ -162,7 +137,7 @@ impl DiskIo {
             let (sender, receiver) =
                 async_channel::bounded::<QueuedRequest>(config.channel_capacity.get());
             Worker::spawn(worker_idx, receiver, config.clone())?;
-            workers.push(WorkerHandle { sender});
+            workers.push(WorkerHandle { sender });
         }
 
         Ok(Self { workers: Arc::<[WorkerHandle]>::from(workers) })
@@ -189,7 +164,10 @@ impl DiskIo {
         response_rx.recv().await.map_err(|_| vfs::Error::IO)?.map_err(Self::io_error_to_vfs)
     }
 
-    pub async fn stat_many(&self, paths: Vec<PathBuf>) -> Result<Vec<(PathBuf, file::Attr)>, vfs::Error> {
+    pub async fn stat_many(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<(PathBuf, file::Attr)>, vfs::Error> {
         let mut receivers = Vec::with_capacity(paths.len());
         for path in paths {
             let (response_tx, response_rx) = async_channel::bounded(1);
@@ -206,7 +184,11 @@ impl DiskIo {
 
         let mut results = Vec::with_capacity(receivers.len());
         for (path, receiver) in receivers {
-            let attr = receiver.recv().await.map_err(|_| vfs::Error::IO)?.map_err(Self::io_error_to_vfs)?;
+            let attr = receiver
+                .recv()
+                .await
+                .map_err(|_| vfs::Error::IO)?
+                .map_err(Self::io_error_to_vfs)?;
             results.push((path, attr));
         }
         Ok(results)
@@ -299,11 +281,7 @@ impl DiskIo {
         let shard = self.shard_for_path(path);
         self.dispatch_to_shard(
             shard,
-            Request::Open {
-                path: path.to_path_buf(),
-                writable,
-                response: response_tx,
-            },
+            Request::Open { path: path.to_path_buf(), writable, response: response_tx },
             RequestPriority::Foreground,
         )
         .await
@@ -320,20 +298,19 @@ impl DiskIo {
         let worker = &self.workers[shard % self.workers.len()];
         let queued = QueuedRequest { priority, request };
         match priority {
-            RequestPriority::Foreground => worker
-                .sender
-                .send(queued)
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "io_uring workers stopped")),
+            RequestPriority::Foreground => {
+                worker.sender.send(queued).await.map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "io_uring workers stopped")
+                })
+            }
             RequestPriority::Background => match worker.sender.try_send(queued) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
                     Err(io::Error::new(io::ErrorKind::WouldBlock, "background queue is full"))
                 }
-                Err(TrySendError::Closed(_)) => Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "io_uring workers stopped",
-                )),
+                Err(TrySendError::Closed(_)) => {
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring workers stopped"))
+                }
             },
         }
     }
@@ -379,23 +356,21 @@ impl Worker {
         config: DiskIoConfig,
     ) -> io::Result<()> {
         let ring = IoUring::new(config.ring_entries)?;
-        thread::Builder::new()
-            .name(format!("mirrorfs-uring-{worker_idx}"))
-            .spawn(move || {
-                let mut worker = Self {
-                    worker_idx,
-                    ring,
-                    receiver,
-                    config,
-                    pending_foreground: VecDeque::new(),
-                    pending_background: VecDeque::new(),
-                    retry_queue: VecDeque::new(),
-                    inflight: HashMap::new(),
-                    background_inflight: 0,
-                    next_user_data: 1,
-                };
-                worker.run();
-            })?;
+        thread::Builder::new().name(format!("mirrorfs-uring-{worker_idx}")).spawn(move || {
+            let mut worker = Self {
+                worker_idx,
+                ring,
+                receiver,
+                config,
+                pending_foreground: VecDeque::new(),
+                pending_background: VecDeque::new(),
+                retry_queue: VecDeque::new(),
+                inflight: HashMap::new(),
+                background_inflight: 0,
+                next_user_data: 1,
+            };
+            worker.run();
+        })?;
         Ok(())
     }
 
@@ -408,11 +383,9 @@ impl Worker {
             self.drain_request_queue();
 
             let submitted = self.submit_ready_ops();
-            if submitted > 0 {
-                if self.ring.submit().is_err() {
-                    self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring submit failed"));
-                    break;
-                }
+            if submitted > 0 && self.ring.submit().is_err() {
+                self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring submit failed"));
+                break;
             }
 
             let completed_now = self.drain_completions();
@@ -471,7 +444,9 @@ impl Worker {
         let mut submitted = 0usize;
         let sqe_budget = self.config.ring_entries as usize;
 
-        while submitted < sqe_budget && self.inflight.len() < self.config.max_inflight_per_worker.get() {
+        while submitted < sqe_budget
+            && self.inflight.len() < self.config.max_inflight_per_worker.get()
+        {
             let mut op = match self.next_ready_op() {
                 Some(op) => op,
                 None => break,
@@ -498,7 +473,6 @@ impl Worker {
             }
             self.inflight.insert(user_data, op);
             submitted += 1;
-
         }
 
         submitted
@@ -577,11 +551,9 @@ impl Worker {
                     prepared: PreparedWrite::Empty,
                 }))
             }
-            Request::Fsync { file, data_only, response } => Some(InflightOp::Fsync(FsyncOp {
-                file,
-                data_only,
-                response,
-            })),
+            Request::Fsync { file, data_only, response } => {
+                Some(InflightOp::Fsync(FsyncOp { file, data_only, response }))
+            }
             Request::ReadAhead { file, offset, len, response } => {
                 if len == 0 {
                     let _ = response.send_blocking(Ok(Arc::<[u8]>::from(Vec::<u8>::new())));
@@ -786,11 +758,13 @@ impl ReadOp {
                     .offset(self.current_offset)
                     .build()
             }
-            PreparedRead::Vectored(storage) => {
-                opcode::Readv::new(types::Fd(self.file.raw_fd()), storage.as_ptr(), storage.len() as u32)
-                    .offset(self.current_offset)
-                    .build()
-            }
+            PreparedRead::Vectored(storage) => opcode::Readv::new(
+                types::Fd(self.file.raw_fd()),
+                storage.as_ptr(),
+                storage.len() as u32,
+            )
+            .offset(self.current_offset)
+            .build(),
             PreparedRead::Empty => {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty read submission"));
             }
@@ -930,9 +904,9 @@ impl WriteOp {
     fn finish_ok(self) -> CompletionStep {
         match self.file.backing_file().metadata() {
             Ok(meta) => {
-                let _ =
-                    self.response
-                        .send_blocking(Ok((attr_from_metadata(&meta), self.total_written as u32)));
+                let _ = self
+                    .response
+                    .send_blocking(Ok((attr_from_metadata(&meta), self.total_written as u32)));
             }
             Err(error) => {
                 let _ = self.response.send_blocking(Err(error));
@@ -1137,7 +1111,9 @@ struct IoVecStorage {
 impl Default for IoVecStorage {
     fn default() -> Self {
         Self {
-            inline: unsafe { MaybeUninit::<[libc::iovec; INLINE_IOVEC_CAP]>::zeroed().assume_init() },
+            inline: unsafe {
+                MaybeUninit::<[libc::iovec; INLINE_IOVEC_CAP]>::zeroed().assume_init()
+            },
             len: 0,
             heap: Vec::new(),
         }
@@ -1198,16 +1174,6 @@ fn cqe_result(result: i32) -> io::Result<i32> {
     }
 }
 
-fn update_max(value: &AtomicUsize, candidate: usize) {
-    let mut current = value.load(Ordering::Relaxed);
-    while candidate > current {
-        match value.compare_exchange(current, candidate, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => break,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
 fn attr_from_metadata(meta: &std::fs::Metadata) -> file::Attr {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
@@ -1248,8 +1214,5 @@ fn attr_from_metadata(meta: &std::fs::Metadata) -> file::Attr {
 }
 
 fn file_time(seconds: i64, nanos: u32) -> file::Time {
-    file::Time {
-        seconds: seconds.max(0).min(u32::MAX as i64) as u32,
-        nanos,
-    }
+    file::Time { seconds: seconds.max(0).min(u32::MAX as i64) as u32, nanos }
 }

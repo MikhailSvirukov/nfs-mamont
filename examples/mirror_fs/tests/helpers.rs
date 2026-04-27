@@ -51,7 +51,9 @@ impl TestContext {
     }
 
     pub async fn lookup_handle(&self, parent: file::Handle, child_name: &str) -> file::Handle {
-        match lookup::Lookup::lookup(&self.fs, lookup::Args { parent, name: name(child_name) }).await {
+        match lookup::Lookup::lookup(&self.fs, lookup::Args { parent, name: name(child_name) })
+            .await
+        {
             Ok(success) => success.file,
             Err(error) => panic!("lookup should succeed: {:?}", error.error),
         }
@@ -83,7 +85,9 @@ impl MultiExportTestContext {
     }
 
     pub async fn lookup_handle(&self, parent: file::Handle, child_name: &str) -> file::Handle {
-        match lookup::Lookup::lookup(&self.fs, lookup::Args { parent, name: name(child_name) }).await {
+        match lookup::Lookup::lookup(&self.fs, lookup::Args { parent, name: name(child_name) })
+            .await
+        {
             Ok(success) => success.file,
             Err(error) => panic!("lookup should succeed: {:?}", error.error),
         }

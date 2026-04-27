@@ -16,7 +16,7 @@ use nfs_mamont::vfs::set_attr;
 use nfs_mamont::vfs::write;
 
 use crate::config::{DiskIoConfig, ReadPathConfig};
-use crate::disk_io::{DiskFile, DiskIo, DiskIoMetricsSnapshot};
+use crate::disk_io::{DiskFile, DiskIo};
 use crate::fs_map::FsMap;
 
 mod access_impl;
@@ -232,7 +232,8 @@ impl MirrorFS {
                 as u64;
         Self {
             exports,
-            disk_io: DiskIo::with_config(disk_io_config).expect("failed to initialize io_uring backend"),
+            disk_io: DiskIo::with_config(disk_io_config)
+                .expect("failed to initialize io_uring backend"),
             read_path_config,
             read_file_cache: ReadFileCache::new(),
             write_file_cache: WriteFileCache::new(),
@@ -509,7 +510,8 @@ impl MirrorFS {
         if self.attr_cache.key_index.read().unwrap().len() <= ATTRIBUTE_CACHE_LIMIT * 4 {
             return;
         }
-        let keys: Vec<PathBuf> = self.attr_cache.key_index.read().unwrap().iter().cloned().collect();
+        let keys: Vec<PathBuf> =
+            self.attr_cache.key_index.read().unwrap().iter().cloned().collect();
         let stale_keys: Vec<PathBuf> =
             keys.into_iter().filter(|key| self.attr_cache.attrs.get(key).is_none()).collect();
         for key in stale_keys {
@@ -539,8 +541,10 @@ impl MirrorFS {
         }
 
         for batch in misses.chunks(READDIRPLUS_ATTR_PARALLELISM) {
-            let stats =
-                self.disk_io.stat_many(batch.iter().map(|(_, path)| path.clone()).collect()).await?;
+            let stats = self
+                .disk_io
+                .stat_many(batch.iter().map(|(_, path)| path.clone()).collect())
+                .await?;
             let stat_map = stats.into_iter().collect::<HashMap<_, _>>();
 
             for (idx, path) in batch.iter() {
@@ -630,7 +634,8 @@ impl MirrorFS {
         let sequential = sequence
             .get(path)
             .map(|state| {
-                state.next_offset == start && now.saturating_duration_since(state.last_seen) <= sequence_window
+                state.next_offset == start
+                    && now.saturating_duration_since(state.last_seen) <= sequence_window
             })
             .unwrap_or(false);
 
@@ -945,7 +950,10 @@ impl MirrorFS {
         Ok(result)
     }
 
-    async fn load_directory_entries(&self, dir_path: &Path) -> Result<Vec<DirectoryEntrySnapshot>, vfs::Error> {
+    async fn load_directory_entries(
+        &self,
+        dir_path: &Path,
+    ) -> Result<Vec<DirectoryEntrySnapshot>, vfs::Error> {
         let listing = self.disk_io.read_dir(dir_path).await?;
         let mut entries = Vec::with_capacity(listing.len());
         for item in listing {

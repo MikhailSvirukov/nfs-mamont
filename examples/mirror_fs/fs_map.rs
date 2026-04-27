@@ -97,7 +97,7 @@ impl FsMap {
             state.key_to_paths.entry(key).or_default();
             Self::insert_relative_alias_locked(&mut state, relative, key);
 
-            return Ok(Self::encode_handle(reserved));
+            Ok(Self::encode_handle(reserved))
         }
     }
 
@@ -114,7 +114,9 @@ impl FsMap {
         let to_remove = state
             .relative_index
             .iter()
-            .filter(|known_relative| *known_relative == &relative || known_relative.starts_with(&relative))
+            .filter(|known_relative| {
+                *known_relative == &relative || known_relative.starts_with(&relative)
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -152,17 +154,16 @@ impl FsMap {
             if from_shard <= to_shard { (from_shard, to_shard) } else { (to_shard, from_shard) };
 
         let _first_guard = self.mutation_locks[first].lock().unwrap();
-        let _second_guard = if second != first {
-            Some(self.mutation_locks[second].lock().unwrap())
-        } else {
-            None
-        };
+        let _second_guard =
+            if second != first { Some(self.mutation_locks[second].lock().unwrap()) } else { None };
 
         let mut state = self.state.write().unwrap();
         let to_rename = state
             .relative_index
             .iter()
-            .filter(|known_relative| *known_relative == &from_relative || known_relative.starts_with(&from_relative))
+            .filter(|known_relative| {
+                *known_relative == &from_relative || known_relative.starts_with(&from_relative)
+            })
             .cloned()
             .collect::<Vec<_>>();
 

@@ -83,8 +83,7 @@ impl Default for AllocatorConfig {
 
 impl Default for DiskIoConfig {
     fn default() -> Self {
-        let worker_count =
-            thread::available_parallelism().map_or(4, usize::from).clamp(2, 8);
+        let worker_count = thread::available_parallelism().map_or(4, usize::from).clamp(2, 8);
         Self {
             worker_count: NonZeroUsize::new(worker_count).unwrap(),
             ring_entries: 256,

@@ -32,8 +32,9 @@ impl read::Read for MirrorFS {
         let block_size = super::READ_AHEAD_BLOCK_SIZE as u64;
 
         let sequential = self.update_read_sequence(&path, start, end).await;
-        let small_random =
-            requested > 0 && requested <= self.read_path_config.small_io_threshold.get() && !sequential;
+        let small_random = requested > 0
+            && requested <= self.read_path_config.small_io_threshold.get()
+            && !sequential;
         let should_prefetch = !small_random
             && (requested >= self.read_path_config.read_ahead_trigger_bytes.get() || sequential);
         if should_prefetch {
@@ -55,7 +56,8 @@ impl read::Read for MirrorFS {
             && !should_prefetch
         {
             read_count = requested;
-            sendfile_source = Some(read::SendfileSource { file: file.backing_file(), offset: start });
+            sendfile_source =
+                Some(read::SendfileSource { file: file.backing_file(), offset: start });
             data = Slice::empty();
         }
 

@@ -98,11 +98,11 @@ impl Default for DiskIoConfig {
 impl Default for ReadPathConfig {
     fn default() -> Self {
         Self {
-            small_io_threshold: NonZeroUsize::new(64 * 1024).unwrap(),
-            read_ahead_trigger_bytes: NonZeroUsize::new(256 * 1024).unwrap(),
-            read_ahead_window_blocks: NonZeroUsize::new(8).unwrap(),
-            read_ahead_per_file_limit: NonZeroUsize::new(16).unwrap(),
-            sequential_detection_window_ms: NonZeroUsize::new(3_000).unwrap(),
+            small_io_threshold: NonZeroUsize::new(32 * 1024).unwrap(),
+            read_ahead_trigger_bytes: NonZeroUsize::new(128 * 1024).unwrap(),
+            read_ahead_window_blocks: NonZeroUsize::new(16).unwrap(),
+            read_ahead_per_file_limit: NonZeroUsize::new(32).unwrap(),
+            sequential_detection_window_ms: NonZeroUsize::new(6_000).unwrap(),
             sendfile_min_bytes: NonZeroUsize::new(32 * 1024).unwrap(),
         }
     }

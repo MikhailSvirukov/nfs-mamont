@@ -347,6 +347,47 @@ struct Worker {
     inflight: HashMap<u64, InflightOp>,
     background_inflight: usize,
     next_user_data: u64,
+    write_coalesce_buf: WriteCoalesceBuffer,
+}
+
+struct WriteCoalesceBuffer {
+    entries: VecDeque<CoalescedWrite>,
+    max_size: usize,
+}
+
+#[allow(dead_code)]
+struct CoalescedWrite {
+    file: Arc<DiskFile>,
+    offset: u64,
+    size: usize,
+    stable: write::StableHow,
+    data: Slice,
+    responses: Vec<Sender<Result<(file::Attr, u32), io::Error>>>,
+    #[allow(dead_code)]
+    original_requests: Vec<WriteOriginalRequest>,
+}
+
+#[allow(dead_code)]
+struct WriteOriginalRequest {
+    offset: u64,
+    size: usize,
+    data: Slice,
+    response: Sender<Result<(file::Attr, u32), io::Error>>,
+}
+
+impl WriteCoalesceBuffer {
+    fn new(max_size: usize) -> Self {
+        Self { entries: VecDeque::new(), max_size }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[allow(dead_code)]
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 impl Worker {
@@ -368,6 +409,7 @@ impl Worker {
                 inflight: HashMap::new(),
                 background_inflight: 0,
                 next_user_data: 1,
+                write_coalesce_buf: WriteCoalesceBuffer::new(64),
             };
             worker.run();
         })?;
@@ -396,6 +438,8 @@ impl Worker {
             if self.inflight.is_empty() {
                 continue;
             }
+
+            self.process_coalesced_writes();
 
             if self.ring.submit_and_wait(1).is_err() {
                 self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring wait failed"));
@@ -434,9 +478,82 @@ impl Worker {
     }
 
     fn enqueue_request(&mut self, queued: QueuedRequest) {
-        match queued.priority {
-            RequestPriority::Foreground => self.pending_foreground.push_back(queued.request),
-            RequestPriority::Background => self.pending_background.push_back(queued.request),
+        match queued.request {
+            Request::Write { file, offset, size, stable, data, response } => {
+                self.coalesce_write(file, offset, size, stable, data, response);
+            }
+            _ => match queued.priority {
+                RequestPriority::Foreground => self.pending_foreground.push_back(queued.request),
+                RequestPriority::Background => self.pending_background.push_back(queued.request),
+            },
+        }
+    }
+
+    fn coalesce_write(
+        &mut self,
+        file: Arc<DiskFile>,
+        offset: u64,
+        size: usize,
+        stable: write::StableHow,
+        data: Slice,
+        response: Sender<Result<(file::Attr, u32), io::Error>>,
+    ) {
+        const COALESCE_WINDOW_BYTES: u64 = 128 * 1024;
+
+        if self.write_coalesce_buf.entries.len() >= self.write_coalesce_buf.max_size {
+            self.flush_coalesced_writes();
+        }
+
+        if let Some(last) = self.write_coalesce_buf.entries.back_mut() {
+            if Arc::ptr_eq(&last.file, &file)
+                && last.stable == stable
+                && offset >= last.offset
+                && offset <= last.offset.saturating_add(last.size as u64)
+                && offset.saturating_sub(last.offset) < COALESCE_WINDOW_BYTES
+            {
+                last.offset = last.offset.min(offset);
+                last.size += size;
+                last.responses.push(response);
+                return;
+            }
+        }
+
+        let new_entry = CoalescedWrite {
+            file,
+            offset,
+            size,
+            stable,
+            data,
+            responses: vec![response],
+            original_requests: Vec::new(),
+        };
+        self.write_coalesce_buf.entries.push_back(new_entry);
+    }
+
+    fn flush_coalesced_writes(&mut self) {
+        for coalesced in self.write_coalesce_buf.entries.drain(..) {
+            let total_size = coalesced.size;
+            if total_size == 0 {
+                for response in coalesced.responses {
+                    let result = coalesced
+                        .file
+                        .backing_file()
+                        .metadata()
+                        .map(|m| (attr_from_metadata(&m), 0))
+                        .map_err(io::Error::other);
+                    let _ = response.send_blocking(result);
+                }
+                continue;
+            }
+
+            self.pending_foreground.push_front(Request::Write {
+                file: coalesced.file,
+                offset: coalesced.offset,
+                size: total_size,
+                stable: coalesced.stable,
+                data: coalesced.data,
+                response: async_channel::bounded(1).0,
+            });
         }
     }
 
@@ -492,6 +609,13 @@ impl Worker {
         }
 
         self.pending_background.pop_front().and_then(|request| self.request_to_op(request))
+    }
+
+    fn process_coalesced_writes(&mut self) {
+        if self.write_coalesce_buf.is_empty() {
+            return;
+        }
+        self.flush_coalesced_writes();
     }
 
     fn request_to_op(&mut self, request: Request) -> Option<InflightOp> {

@@ -53,6 +53,7 @@ impl read::Read for MirrorFS {
         if !small_random
             && requested >= self.read_path_config.sendfile_min_bytes.get()
             && read_count == 0
+            && !should_prefetch
         {
             read_count = requested;
             sendfile_source =

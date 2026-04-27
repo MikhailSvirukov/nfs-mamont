@@ -347,6 +347,14 @@ struct Worker {
     inflight: HashMap<u64, InflightOp>,
     background_inflight: usize,
     next_user_data: u64,
+    pending_fsyncs: VecDeque<PendingFsync>,
+    last_fsync_time: Option<std::time::Instant>,
+}
+
+struct PendingFsync {
+    file: Arc<DiskFile>,
+    data_only: bool,
+    response: Sender<Result<(), io::Error>>,
 }
 
 impl Worker {
@@ -368,6 +376,8 @@ impl Worker {
                 inflight: HashMap::new(),
                 background_inflight: 0,
                 next_user_data: 1,
+                pending_fsyncs: VecDeque::new(),
+                last_fsync_time: None,
             };
             worker.run();
         })?;
@@ -397,11 +407,13 @@ impl Worker {
                 continue;
             }
 
-            if self.ring.submit_and_wait(1).is_err() {
+            let wait_timeout = if self.config.enable_sqpoll { 0 } else { 1 };
+            if self.ring.submit_and_wait(wait_timeout).is_err() {
                 self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring wait failed"));
                 break;
             }
             self.drain_completions();
+            self.flush_pending_fsyncs();
         }
     }
 
@@ -478,6 +490,49 @@ impl Worker {
         submitted
     }
 
+    fn flush_pending_fsyncs(&mut self) {
+        if !self.config.enable_write_coalescing {
+            for pending in self.pending_fsyncs.drain(..) {
+                let _ = pending.response.send_blocking(Ok(()));
+            }
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let window_us = self.config.write_coalesce_window_us.get() as u64;
+        let elapsed = self.last_fsync_time.map(|t| now.duration_since(t).as_micros() as u64);
+
+        let should_flush = elapsed.map_or(false, |e| e >= window_us);
+        let has_pending = !self.pending_fsyncs.is_empty();
+
+        if should_flush || !has_pending {
+            for pending in self.pending_fsyncs.drain(..) {
+                let entry = opcode::Fsync::new(types::Fd(pending.file.raw_fd()))
+                    .flags(if pending.data_only {
+                        types::FsyncFlags::DATASYNC
+                    } else {
+                        types::FsyncFlags::empty()
+                    })
+                    .build();
+                let user_data = self.next_user_data;
+                self.next_user_data = self.next_user_data.wrapping_add(1).max(1);
+                if unsafe { self.ring.submission().push(&entry) }.is_ok() {
+                    self.inflight.insert(
+                        user_data,
+                        InflightOp::Fsync(FsyncOp {
+                            file: pending.file,
+                            data_only: pending.data_only,
+                            response: pending.response,
+                        }),
+                    );
+                } else {
+                    let _ = pending.response.send_blocking(Ok(()));
+                }
+            }
+            self.last_fsync_time = Some(now);
+        }
+    }
+
     fn next_ready_op(&mut self) -> Option<InflightOp> {
         if let Some(op) = self.retry_queue.pop_front() {
             return Some(op);
@@ -530,11 +585,16 @@ impl Worker {
                 }))
             }
             Request::Write { file, offset, size, stable, data, response } => {
+                let data_only = match stable {
+                    write::StableHow::Unstable => false,
+                    write::StableHow::DataSync => true,
+                    write::StableHow::FileSync => false,
+                };
                 let stage = if size == 0 {
-                    match stable {
-                        write::StableHow::Unstable => WriteStage::DoneWithoutSync,
-                        write::StableHow::DataSync => WriteStage::Syncing { data_only: true },
-                        write::StableHow::FileSync => WriteStage::Syncing { data_only: false },
+                    if data_only || matches!(stable, write::StableHow::FileSync) {
+                        WriteStage::Syncing
+                    } else {
+                        WriteStage::DoneWithoutSync
                     }
                 } else {
                     WriteStage::Writing
@@ -542,17 +602,22 @@ impl Worker {
                 Some(InflightOp::Write(WriteOp {
                     file,
                     response,
-                    stable,
                     data,
                     total_written: 0,
                     remaining: size,
                     current_offset: offset,
                     stage,
                     prepared: PreparedWrite::Empty,
+                    data_only,
                 }))
             }
             Request::Fsync { file, data_only, response } => {
-                Some(InflightOp::Fsync(FsyncOp { file, data_only, response }))
+                if self.config.enable_write_coalescing {
+                    self.pending_fsyncs.push_back(PendingFsync { file, data_only, response });
+                    None
+                } else {
+                    Some(InflightOp::Fsync(FsyncOp { file, data_only, response }))
+                }
             }
             Request::ReadAhead { file, offset, len, response } => {
                 if len == 0 {
@@ -612,6 +677,10 @@ impl Worker {
         }
         for (_, op) in self.inflight.drain() {
             op.fail(io::Error::new(error.kind(), message.clone()));
+        }
+        for pending in self.pending_fsyncs.drain(..) {
+            let _ =
+                pending.response.send_blocking(Err(io::Error::new(error.kind(), message.clone())));
         }
     }
 }
@@ -797,18 +866,19 @@ impl ReadOp {
 struct WriteOp {
     file: Arc<DiskFile>,
     response: Sender<Result<(file::Attr, u32), io::Error>>,
-    stable: write::StableHow,
     data: Slice,
     total_written: usize,
     remaining: usize,
     current_offset: u64,
     stage: WriteStage,
     prepared: PreparedWrite,
+    data_only: bool,
 }
 
 enum WriteStage {
     Writing,
-    Syncing { data_only: bool },
+    WaitingForCoalescing,
+    Syncing,
     DoneWithoutSync,
 }
 
@@ -838,12 +908,18 @@ impl WriteOp {
                     }
                 }
             }
-            WriteStage::Syncing { data_only } => {
+            WriteStage::Syncing => {
                 let mut entry = opcode::Fsync::new(types::Fd(self.file.raw_fd()));
-                if data_only {
+                if self.data_only {
                     entry = entry.flags(types::FsyncFlags::DATASYNC);
                 }
                 entry.build()
+            }
+            WriteStage::WaitingForCoalescing => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "write waiting for coalescing should not be submitted",
+                ));
             }
             WriteStage::DoneWithoutSync => {
                 return Err(io::Error::new(
@@ -872,17 +948,11 @@ impl WriteOp {
                     self.current_offset = self.current_offset.saturating_add(step as u64);
                     if self.remaining > 0 {
                         CompletionStep::Resubmit(InflightOp::Write(self))
+                    } else if self.data_only {
+                        self.stage = WriteStage::Syncing;
+                        CompletionStep::Resubmit(InflightOp::Write(self))
                     } else {
-                        self.stage = match self.stable {
-                            write::StableHow::Unstable => WriteStage::DoneWithoutSync,
-                            write::StableHow::DataSync => WriteStage::Syncing { data_only: true },
-                            write::StableHow::FileSync => WriteStage::Syncing { data_only: false },
-                        };
-                        if matches!(self.stage, WriteStage::DoneWithoutSync) {
-                            self.finish_ok()
-                        } else {
-                            CompletionStep::Resubmit(InflightOp::Write(self))
-                        }
+                        self.finish_ok()
                     }
                 }
                 Err(error) => {
@@ -890,13 +960,14 @@ impl WriteOp {
                     CompletionStep::Done
                 }
             },
-            WriteStage::Syncing { .. } => match cqe_result(result) {
+            WriteStage::Syncing => match cqe_result(result) {
                 Ok(_) => self.finish_ok(),
                 Err(error) => {
                     let _ = self.response.send_blocking(Err(error));
                     CompletionStep::Done
                 }
             },
+            WriteStage::WaitingForCoalescing => self.finish_ok(),
             WriteStage::DoneWithoutSync => self.finish_ok(),
         }
     }

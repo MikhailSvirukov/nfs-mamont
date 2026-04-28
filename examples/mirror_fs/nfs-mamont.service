@@ -13,6 +13,9 @@ WorkingDirectory=/var/lib/nfs-mamont
 
 [Install]
 WantedBy=multi-user.target
+
+[Service]
+Environment="MIRRORFS_PATH=/home/ubuntu/test"
 ExecStart=/usr/local/bin/mirrorfs ${MIRRORFS_PATH}
 
 [Service]

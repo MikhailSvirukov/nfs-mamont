@@ -1,0 +1,24 @@
+[Unit]
+Description=NFS Mamont file server
+After=rpcbind.service network-online.target
+Wants=rpcbind.service network-online.target
+Conflicts=nfs-server.service nfs-ganesha.service
+
+[Service]
+Type=simple
+RuntimeDirectory=nfs-mamont
+StateDirectory=nfs-mamont
+LogsDirectory=nfs-mamont
+WorkingDirectory=/var/lib/nfs-mamont
+
+[Install]
+WantedBy=multi-user.target
+ExecStart=/usr/local/bin/mirrorfs ${MIRRORFS_PATH}
+
+[Service]
+LimitNOFILE=131072
+
+[Service]
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=60

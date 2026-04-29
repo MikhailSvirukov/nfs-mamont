@@ -80,10 +80,20 @@ impl Allocator for Impl {
         let remain_size = size.get();
         let count_needed = remain_size.div_ceil(self.buffer_size.get());
 
+        // Measure time spent waiting for permits to detect allocator contention.
+        let wait_start = std::time::Instant::now();
         let permit = match self.state.semaphore.acquire_many(count_needed as u32).await {
             Ok(p) => p,
-            Err(_) => return None,
+            Err(_) => {
+                let waited = wait_start.elapsed();
+                tracing::debug!(need=%count_needed, wait_ms=%waited.as_millis(), "allocator: failed to acquire permits");
+                return None;
+            }
         };
+        let waited = wait_start.elapsed();
+        if waited.as_millis() > 0 {
+            tracing::debug!(need=%count_needed, wait_ms=%waited.as_millis(), "allocator: acquired permits");
+        }
 
         let mut buffers = Vec::with_capacity(count_needed);
         for _ in 0..count_needed {

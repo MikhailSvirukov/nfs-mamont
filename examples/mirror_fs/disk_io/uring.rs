@@ -13,6 +13,7 @@ use std::thread;
 
 use async_channel::{Receiver, Sender, TryRecvError, TrySendError};
 use io_uring::{opcode, types, IoUring};
+use tracing::debug;
 
 use nfs_mamont::vfs;
 use nfs_mamont::vfs::file;
@@ -464,8 +465,11 @@ impl Worker {
 
             self.drain_request_queue();
 
+            let submit_start = std::time::Instant::now();
             let submitted = self.submit_ready_ops();
+            let submit_elapsed = submit_start.elapsed();
             if submitted > 0 {
+                debug!(worker=%self.worker_idx, submitted, submit_ms=%submit_elapsed.as_millis(), "io_uring: submit_ready_ops");
                 if self.ring.submit().is_err() {
                     self.fail_all(io::Error::new(io::ErrorKind::BrokenPipe, "io_uring submit failed"));
                     break;

@@ -1,6 +1,6 @@
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tracing::{error, info};
+use tracing::{error, info, debug};
 
 use crate::rpc::{AuthFlavor, OpaqueAuth};
 use crate::serializer;
@@ -36,6 +36,8 @@ impl WriteTask {
 
         'outer: while let Some(reply) = result_receiver.recv().await {
             // Process the first received reply
+            let batch_start = std::time::Instant::now();
+            let mut batch_count = 1usize;
             let verifier = OpaqueAuth { flavor: AuthFlavor::None, body: vec![] };
             info!(xid=%reply.xid, "write task: reply");
             if let Err(e) = serializer.form_reply(reply, verifier).await {
@@ -50,6 +52,7 @@ impl WriteTask {
                         Ok(None) => break 'outer,
                         Err(_) => break,
                     };
+                batch_count += 1;
                 let verifier = OpaqueAuth { flavor: AuthFlavor::None, body: vec![] };
                 info!(xid=%next_reply.xid, "write task: reply (batched)");
                 if let Err(e) = serializer.form_reply(next_reply, verifier).await {
@@ -58,6 +61,8 @@ impl WriteTask {
             }
 
             // After draining all ready replies, flush the buffered writer to the socket.
+            let batch_elapsed = batch_start.elapsed();
+            debug!(batch_count, batch_ms = %batch_elapsed.as_millis(), "write task: flushed batch");
             if let Err(e) = serializer.flush().await {
                 error!(error=%e, "write task: failed to flush buffered replies");
             }

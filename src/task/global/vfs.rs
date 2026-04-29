@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{error, warn};
+use tracing::{error, warn, debug};
 
 use crate::allocator::{Allocator, Impl, Slice};
 use crate::parser::{NfsArgWrapper, NfsArguments};
@@ -104,6 +104,7 @@ impl<V: Vfs + Send + Sync + 'static> VfsTask<V> {
         let command_receiver = self.command_receiver;
 
         while let Ok((command, tx)) = command_receiver.recv().await {
+            let command_start = std::time::Instant::now();
             let NfsArgWrapper { header, proc } = command;
             let proc_name = Self::proc_name(&proc);
 
@@ -162,6 +163,9 @@ impl<V: Vfs + Send + Sync + 'static> VfsTask<V> {
                 xid: header.xid,
                 proc_result: Ok(ProcResult::Nfs3(Box::new(response))),
             };
+
+            let elapsed = command_start.elapsed();
+            debug!(proc=%proc_name, xid=%reply.xid, ms=%elapsed.as_millis(), "vfs: handled command");
 
             // Write task may already be closed; then this connection pipeline is done.
             if tx.send(reply).is_err() {
